@@ -2,7 +2,7 @@ name: VIP Channel (every 5 min)
 
 on:
   schedule:
-    - cron: "3,8,13,18,23,28,33,38,43,48,53,58/5 * * * *"    # every 5 minutes
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"    # every 5 minutes
   workflow_dispatch: {}
 
 permissions:
