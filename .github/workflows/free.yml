@@ -22,7 +22,7 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
       # ⬇️ EDIT THIS: replace with your site / VIP landing link (shows under every free post)
-      FOOTER: "your-site-link"
+      FOOTER: "https://saintmalkid.github.io/fx-site/checkout.html"
     steps:
       - uses: actions/checkout@v4
 
