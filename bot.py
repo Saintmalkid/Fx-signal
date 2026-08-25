@@ -596,4 +596,90 @@ def run_symbol(sym, sym_state, chat, vip):
             if vip and conf <= MIN_CONF_VIP:
                 # VIP quality bar: found a setup, but it's not A+ — skip it.
                 log("  %s: setup found (%d%% conf) \u2264 VIP bar (%d%%) — skipped"
-                    % (
+                    % (cfg["label"], conf, MIN_CONF_VIP))
+            else: 
+                tr = make_trade(sym, sig, now)
+                sym_state["open"] = tr
+                sym_state["last_signal_ts"] = now
+                send_telegram(chat, signal_message(sym, tr, vip=vip))
+                log("  %s: NEW %s signal at %s (%d%% conf)"
+                    % (cfg["label"], tr["side"], fmt(sym, tr["entry"]), conf))
+        else:
+            log("  %s: no breakout setup — flat" % cfg["label"])
+
+
+def run_channel(role):
+    chat = VIP_CHAT if role == "vip" else FREE_CHAT
+    path = "state-%s.json" % role
+    fresh = not os.path.exists(path)
+    st = load_state(path)
+    if fresh:
+        # One-time hello: instantly proves token + chat ID are correct.
+        send_telegram(chat, welcome_message(role))
+    symbols = SYMBOLS_BY_ROLE.get(role, SYMBOLS_BY_ROLE["free"])
+    log("Scanning %d symbol(s) for role '%s'" % (len(symbols), role))
+    for sym in symbols:
+        ss = st["symbols"].setdefault(sym, new_symbol_state())
+        run_symbol(sym, ss, chat, vip=(role == "vip"))
+    save_state(st, path)
+
+
+def collect_stats(role):
+    empty = {"signals": 0, "wins": 0, "losses": 0, "winrate": 0,
+             "pips": 0.0, "per_symbol": {}}
+    try:
+        with open("state-%s.json" % role) as f:
+            st = json.load(f)
+    except Exception:
+        return empty
+    cutoff = time.time() - 24 * 3600
+    trades = []
+    for sym, ss in st.get("symbols", {}).items():
+        for t in ss.get("closed", []):
+            if t.get("closed_ts", 0) >= cutoff:
+                trades.append(t)
+    if not trades:
+        return empty
+    wins = [t for t in trades if t["win"]]
+    per = {}
+    for t in trades:
+        per[t["symbol"]] = per.get(t["symbol"], 0) + 1
+    return {"signals": len(trades), "wins": len(wins),
+            "losses": len(trades) - len(wins),
+            "winrate": int(100 * len(wins) / len(trades)),
+            "pips": round(sum(t["pips"] for t in trades), 1),
+            "per_symbol": per, "trades": trades}
+
+
+def run_recap():
+    vip_s, free_s = collect_stats("vip"), collect_stats("free")
+    total_n = vip_s["signals"] + free_s["signals"]
+    if total_n == 0:
+        log("No signals in the last 24h — posting nothing (normal on a new setup).")
+        return
+    best = None
+    for s in (vip_s, free_s):
+        for t in s.get("trades", []):
+            if best is None or t["pips"] > best["pips"]:
+                best = t
+    stats = {"vip": vip_s, "free": free_s, "best": best}
+    send_telegram(VIP_CHAT, recap_message(stats, vip=True))
+    send_telegram(FREE_CHAT, recap_message(stats, vip=False))
+
+
+def main():
+    log("gold-hl-bot starting — role: %s" % ROLE)
+    try:
+        if ROLE == "recap":
+            run_recap()
+        else:
+            run_channel(ROLE)
+    except Exception as e:
+        log("FATAL: %s" % e)
+        sys.exit(1)
+    log("Done.")
+
+
+if __name__ == "__main__":
+    main()
+    
