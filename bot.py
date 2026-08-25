@@ -73,6 +73,7 @@ SL_ATR      = 1.6            # stop-loss distance in ATRs
 TP1_ATR     = 2.4            # take-profit-1 distance in ATRs
 TP2_ATR     = 4.0            # take-profit-2 distance in ATRs
 COOLDOWN_S  = 45 * 60        # min seconds between new signals (per symbol)
+MIN_CONF_VIP = int(os.environ.get("VIP_MIN_CONF", "85"))  # VIP posts only signals ABOVE this confidence
 TZ          = dt.timezone.utc
 
 # ------------------------------------------------------------------ helpers ---
@@ -266,9 +267,10 @@ def analyze(sym, closes):
 
 
 def confidence(sym, sig):
-    base = 62.0
+    """Confidence 82–99: base + breakout-margin bonus (capped so 99 is rare)."""
+    base = 82.0
     margin = abs(sig["level"] - (sig["hi"] if sig["side"] == "BUY" else sig["lo"]))
-    base += min(margin / max(sig["atr"], 1e-9) * 6.0, 22.0)
+    base += min(margin / max(sig["atr"], 1e-9) * 6.0, 28.0)
     return int(min(round(base), 90))
 
 
@@ -360,6 +362,7 @@ def welcome_message(role):
             "\u2705 GOLD HL BOT — VIP channel is LIVE",
             "",
             "VIP watches: %s" % pairs,
+            "Sniper mode: only setups above 87% confidence get posted." % MIN_CONF_VIP,
             "Full signals with SL + TP1/TP2 land here every 5 minutes.",
             "Daily recap arrives at 21:05 UTC.",
             ts_str(int(time.time())),
@@ -417,11 +420,18 @@ def run_symbol(sym, sym_state, chat, vip):
     if sym_state["open"] is None and now - sym_state["last_signal_ts"] > COOLDOWN_S:
         sig = analyze(sym, closes)
         if sig:
-            tr = make_trade(sym, sig, now)
-            sym_state["open"] = tr
-            sym_state["last_signal_ts"] = now
-            send_telegram(chat, signal_message(sym, tr, vip=vip))
-            log("  %s: NEW %s signal at %s" % (cfg["label"], tr["side"], fmt(sym, tr["entry"])))
+            conf = confidence(sym, sig)
+            if vip and conf <= MIN_CONF_VIP:
+                # VIP quality bar: found a setup, but it's not A+ — skip it.
+                log("  %s: setup found (%d%% conf) \u2264 VIP bar (%d%%) — skipped"
+                    % (cfg["label"], conf, MIN_CONF_VIP))
+            else:
+                tr = make_trade(sym, sig, now)
+                sym_state["open"] = tr
+                sym_state["last_signal_ts"] = now
+                send_telegram(chat, signal_message(sym, tr, vip=vip))
+                log("  %s: NEW %s signal at %s (%d%% conf)"
+                    % (cfg["label"], tr["side"], fmt(sym, tr["entry"]), conf))
         else:
             log("  %s: no breakout setup — flat" % cfg["label"])
 
