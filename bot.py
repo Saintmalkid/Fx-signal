@@ -48,20 +48,192 @@ FOOTER      = os.environ.get("FOOTER", "").strip()
 # Which symbols each role watches
 SYMBOLS_BY_ROLE = {
     "free": ["XAUUSD"],
-    "vip":  ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"],
+
+    # Optimized VIP list:
+    # GOLD + all 7 major forex pairs + 10 liquid cross pairs.
+    # No exotic pairs included.
+    "vip": [
+        "XAUUSD",
+
+        # Major pairs
+        "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
+
+        # High-liquidity cross pairs
+        "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "NZDJPY",
+        "EURAUD", "EURCAD", "GBPAUD", "CADJPY", "CHFJPY",
+    ],
 }
 
 # Per-symbol configuration: display, pip size, decimals, ATR floor, feeds
 SYMBOL_CFG = {
-    "XAUUSD": {"label": "GOLD",    "emoji": "\U0001F7E1", "pip": 0.1,
-               "dec": 2, "atr_floor": 0.5,    "td": "XAU/USD", "yahoo": "GC=F",
-               "gold_api": "XAU"},
-    "EURUSD": {"label": "EUR/USD", "emoji": "\U0001F535", "pip": 0.0001,
-               "dec": 4, "atr_floor": 0.0008, "td": "EUR/USD", "yahoo": "EURUSD=X"},
-    "GBPUSD": {"label": "GBP/USD", "emoji": "\U0001F535", "pip": 0.0001,
-               "dec": 4, "atr_floor": 0.0008, "td": "GBP/USD", "yahoo": "GBPUSD=X"},
-    "USDJPY": {"label": "USD/JPY", "emoji": "\U0001F534", "pip": 0.01,
-               "dec": 3, "atr_floor": 0.05,   "td": "USD/JPY", "yahoo": "USDJPY=X"},
+    # ----------------------------- GOLD -----------------------------
+    "XAUUSD": {
+        "label": "GOLD",
+        "emoji": "🟡",
+        "pip": 0.1,
+        "dec": 2,
+        "atr_floor": 0.5,
+        "td": "XAU/USD",
+        "yahoo": "GC=F",
+        "gold_api": "XAU",
+    },
+
+    # ----------------------------- MAJOR PAIRS -----------------------------
+    "EURUSD": {
+        "label": "EUR/USD",
+        "emoji": "🔵",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0008,
+        "td": "EUR/USD",
+        "yahoo": "EURUSD=X",
+    },
+    "GBPUSD": {
+        "label": "GBP/USD",
+        "emoji": "🔵",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0008,
+        "td": "GBP/USD",
+        "yahoo": "GBPUSD=X",
+    },
+    "USDJPY": {
+        "label": "USD/JPY",
+        "emoji": "🔴",
+        "pip": 0.01,
+        "dec": 3,
+        "atr_floor": 0.05,
+        "td": "USD/JPY",
+        "yahoo": "USDJPY=X",
+    },
+    "USDCHF": {
+        "label": "USD/CHF",
+        "emoji": "🔵",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0008,
+        "td": "USD/CHF",
+        "yahoo": "USDCHF=X",
+    },
+    "USDCAD": {
+        "label": "USD/CAD",
+        "emoji": "🔵",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0008,
+        "td": "USD/CAD",
+        "yahoo": "USDCAD=X",
+    },
+    "AUDUSD": {
+        "label": "AUD/USD",
+        "emoji": "🔵",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0008,
+        "td": "AUD/USD",
+        "yahoo": "AUDUSD=X",
+    },
+    "NZDUSD": {
+        "label": "NZD/USD",
+        "emoji": "🔵",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0008,
+        "td": "NZD/USD",
+        "yahoo": "NZDUSD=X",
+    },
+
+    # ----------------------------- LIQUID CROSS PAIRS -----------------------------
+    "EURGBP": {
+        "label": "EUR/GBP",
+        "emoji": "🟣",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0007,
+        "td": "EUR/GBP",
+        "yahoo": "EURGBP=X",
+    },
+    "EURJPY": {
+        "label": "EUR/JPY",
+        "emoji": "🔴",
+        "pip": 0.01,
+        "dec": 3,
+        "atr_floor": 0.05,
+        "td": "EUR/JPY",
+        "yahoo": "EURJPY=X",
+    },
+    "GBPJPY": {
+        "label": "GBP/JPY",
+        "emoji": "🔴",
+        "pip": 0.01,
+        "dec": 3,
+        "atr_floor": 0.08,
+        "td": "GBP/JPY",
+        "yahoo": "GBPJPY=X",
+    },
+    "AUDJPY": {
+        "label": "AUD/JPY",
+        "emoji": "🔴",
+        "pip": 0.01,
+        "dec": 3,
+        "atr_floor": 0.05,
+        "td": "AUD/JPY",
+        "yahoo": "AUDJPY=X",
+    },
+    "NZDJPY": {
+        "label": "NZD/JPY",
+        "emoji": "🔴",
+        "pip": 0.01,
+        "dec": 3,
+        "atr_floor": 0.05,
+        "td": "NZD/JPY",
+        "yahoo": "NZDJPY=X",
+    },
+    "EURAUD": {
+        "label": "EUR/AUD",
+        "emoji": "🟣",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0010,
+        "td": "EUR/AUD",
+        "yahoo": "EURAUD=X",
+    },
+    "EURCAD": {
+        "label": "EUR/CAD",
+        "emoji": "🟣",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0009,
+        "td": "EUR/CAD",
+        "yahoo": "EURCAD=X",
+    },
+    "GBPAUD": {
+        "label": "GBP/AUD",
+        "emoji": "🟣",
+        "pip": 0.0001,
+        "dec": 4,
+        "atr_floor": 0.0012,
+        "td": "GBP/AUD",
+        "yahoo": "GBPAUD=X",
+    },
+    "CADJPY": {
+        "label": "CAD/JPY",
+        "emoji": "🔴",
+        "pip": 0.01,
+        "dec": 3,
+        "atr_floor": 0.05,
+        "td": "CAD/JPY",
+        "yahoo": "CADJPY=X",
+    },
+    "CHFJPY": {
+        "label": "CHF/JPY",
+        "emoji": "🔴",
+        "pip": 0.01,
+        "dec": 3,
+        "atr_floor": 0.05,
+        "td": "CHF/JPY",
+        "yahoo": "CHFJPY=X",
+    },
 }
 
 HISTORY_MAX = 800            # max price points kept per symbol
@@ -424,90 +596,4 @@ def run_symbol(sym, sym_state, chat, vip):
             if vip and conf <= MIN_CONF_VIP:
                 # VIP quality bar: found a setup, but it's not A+ — skip it.
                 log("  %s: setup found (%d%% conf) \u2264 VIP bar (%d%%) — skipped"
-                    % (cfg["label"], conf, MIN_CONF_VIP))
-            else:
-                tr = make_trade(sym, sig, now)
-                sym_state["open"] = tr
-                sym_state["last_signal_ts"] = now
-                send_telegram(chat, signal_message(sym, tr, vip=vip))
-                log("  %s: NEW %s signal at %s (%d%% conf)"
-                    % (cfg["label"], tr["side"], fmt(sym, tr["entry"]), conf))
-        else:
-            log("  %s: no breakout setup — flat" % cfg["label"])
-
-
-def run_channel(role):
-    chat = VIP_CHAT if role == "vip" else FREE_CHAT
-    path = "state-%s.json" % role
-    fresh = not os.path.exists(path)
-    st = load_state(path)
-    if fresh:
-        # One-time hello: instantly proves token + chat ID are correct.
-        send_telegram(chat, welcome_message(role))
-    symbols = SYMBOLS_BY_ROLE.get(role, SYMBOLS_BY_ROLE["free"])
-    log("Scanning %d symbol(s) for role '%s'" % (len(symbols), role))
-    for sym in symbols:
-        ss = st["symbols"].setdefault(sym, new_symbol_state())
-        run_symbol(sym, ss, chat, vip=(role == "vip"))
-    save_state(st, path)
-
-
-def collect_stats(role):
-    empty = {"signals": 0, "wins": 0, "losses": 0, "winrate": 0,
-             "pips": 0.0, "per_symbol": {}}
-    try:
-        with open("state-%s.json" % role) as f:
-            st = json.load(f)
-    except Exception:
-        return empty
-    cutoff = time.time() - 24 * 3600
-    trades = []
-    for sym, ss in st.get("symbols", {}).items():
-        for t in ss.get("closed", []):
-            if t.get("closed_ts", 0) >= cutoff:
-                trades.append(t)
-    if not trades:
-        return empty
-    wins = [t for t in trades if t["win"]]
-    per = {}
-    for t in trades:
-        per[t["symbol"]] = per.get(t["symbol"], 0) + 1
-    return {"signals": len(trades), "wins": len(wins),
-            "losses": len(trades) - len(wins),
-            "winrate": int(100 * len(wins) / len(trades)),
-            "pips": round(sum(t["pips"] for t in trades), 1),
-            "per_symbol": per, "trades": trades}
-
-
-def run_recap():
-    vip_s, free_s = collect_stats("vip"), collect_stats("free")
-    total_n = vip_s["signals"] + free_s["signals"]
-    if total_n == 0:
-        log("No signals in the last 24h — posting nothing (normal on a new setup).")
-        return
-    best = None
-    for s in (vip_s, free_s):
-        for t in s.get("trades", []):
-            if best is None or t["pips"] > best["pips"]:
-                best = t
-    stats = {"vip": vip_s, "free": free_s, "best": best}
-    send_telegram(VIP_CHAT, recap_message(stats, vip=True))
-    send_telegram(FREE_CHAT, recap_message(stats, vip=False))
-
-
-def main():
-    log("gold-hl-bot starting — role: %s" % ROLE)
-    try:
-        if ROLE == "recap":
-            run_recap()
-        else:
-            run_channel(ROLE)
-    except Exception as e:
-        log("FATAL: %s" % e)
-        sys.exit(1)
-    log("Done.")
-
-
-if __name__ == "__main__":
-    main()
-    
+                    % (
