@@ -1,0 +1,41 @@
+name: VIP Channel (every 5 min)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"    # every 5 minutes
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vip-channel
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    env:
+      ROLE: vip
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_VIP_CHAT_ID: ${{ secrets.TELEGRAM_VIP_CHAT_ID }}
+      TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run bot
+        run: python bot.py
+
+      - name: Commit state (bot memory)
+        run: |
+          git config user.name  "signal-bot"
+          git config user.email "signal-bot@users.noreply.github.com"
+          git add state-*.json || true
+          git commit -m "update state [skip ci]" || echo "nothing to commit"
+          git pull --rebase --autostash || true
+          git push || (git pull --rebase && git push)
