@@ -69,9 +69,9 @@ WARMUP      = 60             # points needed before signalling
 LOOKBACK    = 60             # high/low detection window
 EXCLUDE     = 6              # last N points excluded from the H/L (breakout room)
 ATR_POINTS  = 20             # points used for the volatility (ATR) estimate
-SL_ATR      = 1.6            # stop-loss distance in ATRs
-TP1_ATR     = 2.4            # take-profit-1 distance in ATRs
-TP2_ATR     = 4.0            # take-profit-2 distance in ATRs
+SL_ATR      = 2.6            # stop-loss distance in ATRs (wide: survives 5m noise)
+TP1_ATR     = 3.6            # take-profit-1 distance in ATRs
+TP2_ATR     = 5.6            # take-profit-2 distance in ATRs
 COOLDOWN_S  = 45 * 60        # min seconds between new signals (per symbol)
 MIN_CONF_VIP = int(os.environ.get("VIP_MIN_CONF", "85"))  # VIP posts only signals ABOVE this confidence
 TZ          = dt.timezone.utc
@@ -267,8 +267,8 @@ def analyze(sym, closes):
 
 
 def confidence(sym, sig):
-    """Confidence 82–99: base + breakout-margin bonus (capped so 99 is rare)."""
-    base = 82.0
+    """Confidence 62–90: base + breakout-margin bonus (capped so 90 is rare)."""
+    base = 62.0
     margin = abs(sig["level"] - (sig["hi"] if sig["side"] == "BUY" else sig["lo"]))
     base += min(margin / max(sig["atr"], 1e-9) * 6.0, 28.0)
     return int(min(round(base), 90))
@@ -362,7 +362,7 @@ def welcome_message(role):
             "\u2705 GOLD HL BOT — VIP channel is LIVE",
             "",
             "VIP watches: %s" % pairs,
-            "Sniper mode: only setups above 87% confidence get posted." % MIN_CONF_VIP,
+            "Sniper mode: only setups above %d%% confidence get posted." % MIN_CONF_VIP,
             "Full signals with SL + TP1/TP2 land here every 5 minutes.",
             "Daily recap arrives at 21:05 UTC.",
             ts_str(int(time.time())),
@@ -510,3 +510,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
