@@ -2,7 +2,7 @@ name: FREE Channel (every 15 min)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes
+    - cron: "7,22,37,52/15 * * * *"   # every 15 minutes
   workflow_dispatch: {}       # allows manual "Run workflow" button
 
 permissions:
