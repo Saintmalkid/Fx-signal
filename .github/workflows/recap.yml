@@ -1,0 +1,30 @@
+name: Daily Recap
+
+on:
+  schedule:
+    - cron: "5 21 * * *"     # every day at 21:05 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    env:
+      ROLE: recap
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_VIP_CHAT_ID: ${{ secrets.TELEGRAM_VIP_CHAT_ID }}
+      TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
+      FOOTER: "your-site-link"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run recap
+        run: python bot.py
