@@ -704,7 +704,7 @@ def run_symbol(sym, sym_state, chat, vip, allow_new=True, all_trades=None):
                 "closed_ts": now,
                 "pips": round(pips_for(sym, tr["side"], tr["entry"], exit_price), 1)})
             sym_state["open"] = None
-else:
+        else:
             log("  %s: open %s from %s still running (now %s)"
                 % (cfg["label"], tr["side"], fmt(sym, tr["entry"]), fmt(sym, price)))
 
@@ -736,7 +736,7 @@ else:
             # VIP quality bar: found a setup, but it is not strong enough.
             log("  %s: setup found (%d%% conf) <= VIP bar (%d%%) — skipped"
                 % (cfg["label"], conf, MIN_CONF_VIP))
-            else:
+        else:
             tr = make_trade(sym, sig, now)
             sym_state["open"] = tr
             sym_state["last_signal_ts"] = now
