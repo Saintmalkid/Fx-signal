@@ -237,15 +237,29 @@ SYMBOL_CFG = {
 }
 
 HISTORY_MAX = 800            # max price points kept per symbol
-WARMUP      = 60             # points needed before signalling
+WARMUP      = 120            # safer mode needs more history before signalling
 LOOKBACK    = 60             # high/low detection window
 EXCLUDE     = 6              # last N points excluded from the H/L (breakout room)
-ATR_POINTS  = 20             # points used for the volatility (ATR) estimate
-SL_ATR      = 2.6            # stop-loss distance in ATRs (wide: survives 5m noise)
-TP1_ATR     = 3.6            # take-profit-1 distance in ATRs
-TP2_ATR     = 5.6            # take-profit-2 distance in ATRs
-COOLDOWN_S  = 45 * 60        # min seconds between new signals (per symbol)
-MIN_CONF_VIP = int(os.environ.get("VIP_MIN_CONF", "85"))  # VIP posts only signals ABOVE this confidence
+ATR_POINTS  = 20             # points used for the volatility estimate
+SL_ATR      = 2.2            # tighter controlled risk than the older 2.6 ATR
+TP1_ATR     = 3.2            # take-profit-1 distance in ATRs
+TP2_ATR     = 5.0            # take-profit-2 distance in ATRs
+COOLDOWN_S  = 90 * 60        # minimum time between new signals per symbol
+
+# -------------------------- VIP safety controls -----------------------------
+# The old version allowed too many fake breakouts. This version is stricter:
+# - default VIP minimum is 89, and code posts only ABOVE this, so only 90% posts
+# - pauses a symbol after a loss
+# - pauses all new VIP signals after a losing streak
+# - rejects choppy, weak-trend, and over-extended breakouts
+MIN_CONF_VIP       = int(os.environ.get("VIP_MIN_CONF", "89"))
+LOSS_COOLDOWN_S    = int(os.environ.get("LOSS_COOLDOWN_HOURS", "6")) * 3600
+GLOBAL_LOSS_PAUSE_S = int(os.environ.get("GLOBAL_LOSS_PAUSE_HOURS", "4")) * 3600
+MAX_VIP_PER_DAY    = int(os.environ.get("MAX_VIP_SIGNALS_PER_DAY", "5"))
+MAX_SYMBOL_PER_DAY = int(os.environ.get("MAX_SYMBOL_SIGNALS_PER_DAY", "1"))
+MAX_SPREAD_ATR     = float(os.environ.get("MAX_BREAKOUT_ATR", "2.8"))
+MIN_BREAK_ATR      = float(os.environ.get("MIN_BREAKOUT_ATR", "0.35"))
+MIN_EFFICIENCY     = float(os.environ.get("MIN_TREND_EFFICIENCY", "0.28"))
 TZ          = dt.timezone.utc
 
 # ------------------------------------------------------------------ helpers ---
@@ -420,26 +434,94 @@ def atr_estimate(sym, closes):
     return max(a, SYMBOL_CFG[sym]["atr_floor"])
 
 
+def efficiency_ratio(closes, n=30):
+    """Trend quality: 0 = chop, 1 = clean one-way movement."""
+    if len(closes) <= n:
+        return 0.0
+    net = abs(closes[-1] - closes[-1 - n])
+    path = sum(abs(closes[i] - closes[i - 1]) for i in range(len(closes) - n, len(closes)))
+    return net / max(path, 1e-12)
+
+
+def recent_momentum_ok(side, closes, a):
+    """Require the last few candles to still support the signal direction."""
+    if len(closes) < 8:
+        return False
+    m3 = closes[-1] - closes[-4]
+    m6 = closes[-1] - closes[-7]
+    if side == "BUY":
+        return m3 > 0.10 * a and m6 > 0.20 * a
+    return m3 < -0.10 * a and m6 < -0.20 * a
+
+
 def analyze(sym, closes):
-    """High/Low breakout with trend filter. Returns signal dict or None."""
+    """Safer breakout strategy. Returns signal dict or None.
+
+    The earlier version rewarded very large breakouts, which can enter late and
+    get caught by reversals. This version only accepts clean breakouts with:
+      - EMA trend alignment on two speeds
+      - enough trend efficiency, so chop/ranges are skipped
+      - breakout distance not too small and not too extended
+      - recent momentum still moving in the signal direction
+    """
     if len(closes) < WARMUP:
         return None
+
     window = closes[-(LOOKBACK + EXCLUDE):-EXCLUDE]
     hi, lo = max(window), min(window)
-    last = closes[-1]
+    last, prev = closes[-1], closes[-2]
     fast, slow = ema(closes[-60:], 12), ema(closes[-60:], 48)
+    mid_fast, mid_slow = ema(closes[-120:], 20), ema(closes[-120:], 80)
     a = atr_estimate(sym, closes)
-    if last > hi and fast > slow:
-        return {"side": "BUY", "level": last, "hi": hi, "lo": lo, "atr": a,
-                "kind": "breakout above %s" % fmt(sym, hi)}
-    if last < lo and fast < slow:
-        return {"side": "SELL", "level": last, "hi": hi, "lo": lo, "atr": a,
-                "kind": "breakdown below %s" % fmt(sym, lo)}
+    er = efficiency_ratio(closes, 30)
+
+    # Skip wild one-candle spikes; these often reverse immediately.
+    last_jump_atr = abs(last - prev) / max(a, 1e-9)
+    if last_jump_atr > 1.8:
+        return None
+
+    trend_gap_atr = abs(fast - slow) / max(a, 1e-9)
+    htf_gap_atr = abs(mid_fast - mid_slow) / max(a, 1e-9)
+
+    # GOLD is noisier and produced recent losses, so make it stricter.
+    er_min = MIN_EFFICIENCY + (0.08 if sym == "XAUUSD" else 0.0)
+    trend_min = 0.30 + (0.15 if sym == "XAUUSD" else 0.0)
+
+    if er < er_min or trend_gap_atr < trend_min or htf_gap_atr < 0.20:
+        return None
+
+    def build(side, margin, ref_level, kind):
+        margin_atr = margin / max(a, 1e-9)
+        if margin_atr < MIN_BREAK_ATR or margin_atr > MAX_SPREAD_ATR:
+            return None
+        if not recent_momentum_ok(side, closes, a):
+            return None
+        # Quality score: trend + efficiency + clean breakout. Capped at 90.
+        score = 70.0
+        score += min(er * 18.0, 12.0)
+        score += min(trend_gap_atr * 12.0, 8.0)
+        score += min(htf_gap_atr * 8.0, 5.0)
+        # Sweet spot: a confirmed breakout, but not late/exhausted.
+        sweet = 1.2
+        score += max(0.0, 5.0 - abs(margin_atr - sweet) * 2.2)
+        if sym == "XAUUSD":
+            score -= 2.0
+        return {"side": side, "level": last, "hi": hi, "lo": lo, "atr": a,
+                "conf": int(min(round(score), 90)), "er": round(er, 3),
+                "trend_gap": round(trend_gap_atr, 3), "margin_atr": round(margin_atr, 3),
+                "kind": kind % fmt(sym, ref_level)}
+
+    if last > hi and fast > slow and mid_fast > mid_slow:
+        return build("BUY", last - hi, hi, "clean breakout above %s")
+    if last < lo and fast < slow and mid_fast < mid_slow:
+        return build("SELL", lo - last, lo, "clean breakdown below %s")
     return None
 
 
 def confidence(sym, sig):
-    """Confidence 62–90: base + breakout-margin bonus (capped so 90 is rare)."""
+    """Return the strategy quality score, already calculated by analyze()."""
+    if "conf" in sig:
+        return int(sig["conf"])
     base = 62.0
     margin = abs(sig["level"] - (sig["hi"] if sig["side"] == "BUY" else sig["lo"]))
     base += min(margin / max(sig["atr"], 1e-9) * 6.0, 28.0)
@@ -511,7 +593,7 @@ def recap_message(stats, vip):
              dt.datetime.now(TZ).strftime("%d %b %Y"), ""]
     for label, s in (("VIP", stats.get("vip")), ("Free", stats.get("free"))):
         if s and s["signals"]:
-            per = ", ".join("%s %d" % (SYMBOL_CFG[k]["label"], v)
+            per = ", ".join("%s %d" % (SYMBOL_CFG.get(k, {"label": str(k)})["label"], v)
                             for k, v in sorted(s["per_symbol"].items()) if v)
             lines.append("%s: %d signals (%s) \u00B7 %dW/%dL \u00B7 %d%% \u00B7 %+.0f pips" % (
                 label, s["signals"], per or "-", s["wins"], s["losses"],
@@ -521,7 +603,7 @@ def recap_message(stats, vip):
     best = stats.get("best")
     if best:
         lines += ["", "Best trade: %s %s %+.0f pips" % (
-            SYMBOL_CFG[best["symbol"]]["label"], best["side"], best["pips"])]
+            SYMBOL_CFG.get(best.get("symbol"), {"label": str(best.get("symbol"))})["label"], best["side"], best["pips"])]
         if not vip and FOOTER:
             lines.append("Get every signal: %s" % FOOTER)
     return "\n".join(lines)
@@ -552,7 +634,45 @@ def welcome_message(role):
 
 # ------------------------------------------------------------------- roles ----
 
-def run_symbol(sym, sym_state, chat, vip):
+def closed_trades_from_state(st):
+    trades = []
+    for sym, ss in st.get("symbols", {}).items():
+        for t in ss.get("closed", []):
+            tt = dict(t)
+            if not tt.get("symbol"):
+                tt["symbol"] = sym
+            trades.append(tt)
+    trades.sort(key=lambda x: x.get("closed_ts", 0), reverse=True)
+    return trades
+
+
+def count_trades_today(trades, sym=None):
+    start = dt.datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return sum(1 for t in trades
+               if t.get("opened_ts", t.get("closed_ts", 0)) >= start
+               and (sym is None or t.get("symbol") == sym))
+
+
+def symbol_loss_pause(sym_state, now):
+    closed = sorted(sym_state.get("closed", []), key=lambda x: x.get("closed_ts", 0), reverse=True)
+    if not closed:
+        return False
+    last = closed[0]
+    return (not last.get("win", False)) and now - last.get("closed_ts", 0) < LOSS_COOLDOWN_S
+
+
+def global_loss_pause(st, now):
+    """After a losing streak, stop opening new VIP trades temporarily."""
+    trades = [t for t in closed_trades_from_state(st) if t.get("closed_ts", 0) > now - 24 * 3600]
+    if len(trades) < 3:
+        return False
+    last3 = trades[:3]
+    if all(not t.get("win", False) for t in last3):
+        return now - last3[0].get("closed_ts", 0) < GLOBAL_LOSS_PAUSE_S
+    return False
+
+
+def run_symbol(sym, sym_state, chat, vip, allow_new=True, all_trades=None):
     """Manage one symbol: update history, manage open trade, maybe signal."""
     cfg = SYMBOL_CFG[sym]
     pts = fetch_prices(sym)
@@ -580,32 +700,51 @@ def run_symbol(sym, sym_state, chat, vip):
             win = hit_tp
             send_telegram(chat, close_message(sym, tr, exit_price, reason, win))
             sym_state["closed"].append({
-                **tr, "exit": exit_price, "reason": reason, "win": win,
+                **tr, "symbol": sym, "exit": exit_price, "reason": reason, "win": win,
                 "closed_ts": now,
                 "pips": round(pips_for(sym, tr["side"], tr["entry"], exit_price), 1)})
             sym_state["open"] = None
-        else:
+else:
             log("  %s: open %s from %s still running (now %s)"
                 % (cfg["label"], tr["side"], fmt(sym, tr["entry"]), fmt(sym, price)))
 
-    # 2) maybe open a new signal
-    if sym_state["open"] is None and now - sym_state["last_signal_ts"] > COOLDOWN_S:
-        sig = analyze(sym, closes)
-        if sig:
-            conf = confidence(sym, sig)
-            if vip and conf <= MIN_CONF_VIP:
-                # VIP quality bar: found a setup, but it's not A+ — skip it.
-                log("  %s: setup found (%d%% conf) \u2264 VIP bar (%d%%) — skipped"
-                    % (cfg["label"], conf, MIN_CONF_VIP))
-            else: 
-                tr = make_trade(sym, sig, now)
-                sym_state["open"] = tr
-                sym_state["last_signal_ts"] = now
-                send_telegram(chat, signal_message(sym, tr, vip=vip))
-                log("  %s: NEW %s signal at %s (%d%% conf)"
-                    % (cfg["label"], tr["side"], fmt(sym, tr["entry"]), conf))
-        else:
-            log("  %s: no breakout setup — flat" % cfg["label"])
+    # 2) safety gates before opening a new trade
+    if sym_state["open"] is not None:
+        return
+    if not allow_new:
+        log("  %s: VIP protection pause active — no new signal" % cfg["label"])
+        return
+    if now - sym_state["last_signal_ts"] <= COOLDOWN_S:
+        log("  %s: cooldown active — no new signal" % cfg["label"])
+        return
+    if vip and symbol_loss_pause(sym_state, now):
+        log("  %s: skipped — recent loss cooldown" % cfg["label"])
+        return
+    if vip and all_trades is not None:
+        if count_trades_today(all_trades) >= MAX_VIP_PER_DAY:
+            log("  %s: skipped — VIP daily signal limit reached" % cfg["label"])
+            return
+        if count_trades_today(all_trades, sym) >= MAX_SYMBOL_PER_DAY:
+            log("  %s: skipped — symbol daily limit reached" % cfg["label"])
+            return
+
+    # 3) maybe open a new signal
+    sig = analyze(sym, closes)
+    if sig:
+        conf = confidence(sym, sig)
+        if vip and conf <= MIN_CONF_VIP:
+            # VIP quality bar: found a setup, but it is not strong enough.
+            log("  %s: setup found (%d%% conf) <= VIP bar (%d%%) — skipped"
+                % (cfg["label"], conf, MIN_CONF_VIP))
+            else:
+            tr = make_trade(sym, sig, now)
+            sym_state["open"] = tr
+            sym_state["last_signal_ts"] = now
+            send_telegram(chat, signal_message(sym, tr, vip=vip))
+            log("  %s: NEW %s signal at %s (%d%% conf)"
+                % (cfg["label"], tr["side"], fmt(sym, tr["entry"]), conf))
+    else:
+        log("  %s: no clean safe setup — flat" % cfg["label"])
 
 
 def run_channel(role):
@@ -617,11 +756,19 @@ def run_channel(role):
         # One-time hello: instantly proves token + chat ID are correct.
         send_telegram(chat, welcome_message(role))
     symbols = SYMBOLS_BY_ROLE.get(role, SYMBOLS_BY_ROLE["free"])
+    now = int(time.time())
+    vip = (role == "vip")
+    all_trades = closed_trades_from_state(st)
+    allow_new = True
+    if vip and global_loss_pause(st, now):
+        allow_new = False
+        log("VIP protection: last 3 closed trades were losses — pausing new signals temporarily.")
     log("Scanning %d symbol(s) for role '%s'" % (len(symbols), role))
     for sym in symbols:
         ss = st["symbols"].setdefault(sym, new_symbol_state())
-        run_symbol(sym, ss, chat, vip=(role == "vip"))
+        run_symbol(sym, ss, chat, vip=vip, allow_new=allow_new, all_trades=all_trades)
     save_state(st, path)
+
 
 
 def collect_stats(role):
@@ -637,7 +784,10 @@ def collect_stats(role):
     for sym, ss in st.get("symbols", {}).items():
         for t in ss.get("closed", []):
             if t.get("closed_ts", 0) >= cutoff:
-                trades.append(t)
+                tt = dict(t)
+                if not tt.get("symbol"):
+                    tt["symbol"] = sym
+                trades.append(tt)
     if not trades:
         return empty
     wins = [t for t in trades if t["win"]]
