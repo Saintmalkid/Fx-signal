@@ -323,7 +323,9 @@ def pips_for(sym, side, entry, exit_):
 # ------------------------------------------------------------------- state ----
 
 def new_symbol_state():
-    return {"history": [], "open": None, "closed": [], "last_signal_ts": 0}
+    # history keeps backward-compatible [timestamp, close] points.
+    # candles keeps genuine OHLC [timestamp, open, high, low, close] points.
+    return {"history": [], "candles": [], "open": None, "closed": [], "last_signal_ts": 0}
 
 
 def new_state():
@@ -347,8 +349,10 @@ def load_state(path=None):
         return st
     # ---- old flat format (gold-only era) -> nest under XAUUSD
     migrated = new_state()
+    hist = raw.get("history", [])
     migrated["symbols"]["XAUUSD"] = {
-        "history": raw.get("history", []),
+        "history": hist,
+        "candles": [[int(ts), float(p), float(p), float(p), float(p)] for ts, p in hist],
         "open": raw.get("open"),
         "closed": raw.get("closed", []),
         "last_signal_ts": raw.get("last_signal_ts", 0),
@@ -359,8 +363,10 @@ def load_state(path=None):
 
 def save_state(st, path=None):
     for sym, ss in st["symbols"].items():
+        ss.setdefault("candles", [])
         ss["history"] = ss["history"][-HISTORY_MAX:]
-        ss["closed"]  = ss["closed"][-200:]
+        ss["candles"] = ss["candles"][-HISTORY_MAX:]
+        ss["closed"]  = ss["closed"][-300:]
     p = path or STATE_FILE
     tmp = p + ".tmp"
     with open(tmp, "w") as f:
@@ -372,18 +378,41 @@ def save_state(st, path=None):
 
 # ------------------------------------------------------------------ prices ----
 
+def normalise_candle(c):
+    """Return [ts, open, high, low, close] with sane OHLC ordering."""
+    ts, o, h, l, close = c
+    vals = [float(o), float(h), float(l), float(close)]
+    o, h, l, close = vals
+    h = max(h, o, close)
+    l = min(l, o, close)
+    return [int(round(ts)), o, h, l, close]
+
+
+def merge_candles(sym_state, candles):
+    if not candles:
+        return
+    sym_state.setdefault("candles", [])
+    by_ts = {int(round(c[0])): normalise_candle(c) for c in sym_state.get("candles", []) if len(c) >= 5}
+    for c in candles:
+        if len(c) >= 5 and c[4] and c[4] > 0:
+            nc = normalise_candle(c)
+            by_ts[nc[0]] = nc
+    merged = [by_ts[k] for k in sorted(by_ts)][-HISTORY_MAX:]
+    sym_state["candles"] = merged
+    # Maintain old close-only history for compatibility with older state/recap logic.
+    sym_state["history"] = [[c[0], c[4]] for c in merged]
+
+
 def merge_history(sym_state, points):
+    """Backward-compatible close-only merge. Also mirrors points into candles."""
     if not points:
         return
-    hist = {int(round(ts)): float(p) for ts, p in sym_state["history"]}
-    for ts, price in points:
-        if price and price > 0:
-            hist[int(round(ts))] = float(price)
-    sym_state["history"] = sorted(hist.items())[-HISTORY_MAX:]
+    candles = [[ts, price, price, price, price] for ts, price in points if price and price > 0]
+    merge_candles(sym_state, candles)
 
 
-def fetch_prices(sym):
-    """Return [[unix_ts, price], ...] ascending, newest last. May be empty."""
+def fetch_candles(sym):
+    """Return [[unix_ts, open, high, low, close], ...] ascending. May be empty."""
     cfg = SYMBOL_CFG[sym]
     if TD_KEY:
         try:
@@ -393,13 +422,18 @@ def fetch_prices(sym):
                 % (urllib.parse.quote(cfg["td"]), TD_KEY)
             )
             vals = d.get("values") or []
-            pts = []
+            candles = []
             for v in vals:
                 t = dt.datetime.fromisoformat(v["datetime"][:19]).replace(tzinfo=TZ)
-                pts.append([int(t.timestamp()), float(v["close"])])
-            if pts:
-                log("  %s: Twelve Data (%d pts)" % (cfg["label"], len(pts)))
-                return pts
+                o = float(v.get("open") or v.get("close"))
+                h = float(v.get("high") or v.get("close"))
+                l = float(v.get("low") or v.get("close"))
+                c = float(v["close"])
+                candles.append([int(t.timestamp()), o, h, l, c])
+            candles.sort(key=lambda x: x[0])
+            if candles:
+                log("  %s: Twelve Data OHLC (%d candles)" % (cfg["label"], len(candles)))
+                return candles
         except Exception as e:
             log("  %s: Twelve Data failed: %s" % (cfg["label"], e))
     try:
@@ -407,24 +441,50 @@ def fetch_prices(sym):
                       "%s?interval=5m&range=5d" % urllib.parse.quote(cfg["yahoo"]))
         r = d["chart"]["result"][0]
         ts = r.get("timestamp") or []
-        cl = (r["indicators"]["quote"][0] or {}).get("close") or []
-        pts = [[int(t), float(c)] for t, c in zip(ts, cl) if c]
-        if pts:
-            log("  %s: Yahoo (%d pts)" % (cfg["label"], len(pts)))
-            return pts
+        q = (r["indicators"]["quote"][0] or {})
+        op, hi, lo, cl = q.get("open") or [], q.get("high") or [], q.get("low") or [], q.get("close") or []
+        candles = []
+        for t, o, h, l, c in zip(ts, op, hi, lo, cl):
+            if c is None:
+                continue
+            o = c if o is None else o
+            h = c if h is None else h
+            l = c if l is None else l
+            candles.append(normalise_candle([int(t), float(o), float(h), float(l), float(c)]))
+        if candles:
+            log("  %s: Yahoo OHLC (%d candles)" % (cfg["label"], len(candles)))
+            return candles
     except Exception as e:
         log("  %s: Yahoo failed: %s" % (cfg["label"], e))
     if cfg.get("gold_api"):
         try:
             d = http_json("https://api.gold-api.com/price/%s" % cfg["gold_api"])
-            pts = [[int(time.time()), float(d["price"])]]
+            price = float(d["price"])
+            candles = [[int(time.time()), price, price, price, price]]
             log("  %s: gold-api.com spot" % cfg["label"])
-            return pts
+            return candles
         except Exception as e:
             log("  %s: gold-api failed: %s" % (cfg["label"], e))
     return []
 
+
+def fetch_prices(sym):
+    """Backward-compatible close-only wrapper."""
+    return [[c[0], c[4]] for c in fetch_candles(sym)]
+
 # ---------------------------------------------------------------- strategy ----
+
+def closes_from_candles(candles):
+    return [float(c[4]) for c in candles if len(c) >= 5]
+
+
+def highs_from_candles(candles):
+    return [float(c[2]) for c in candles if len(c) >= 5]
+
+
+def lows_from_candles(candles):
+    return [float(c[3]) for c in candles if len(c) >= 5]
+
 
 def ema(values, period):
     if not values:
@@ -436,7 +496,26 @@ def ema(values, period):
     return e
 
 
-def atr_estimate(sym, closes):
+def true_atr(sym, candles, period=ATR_POINTS):
+    """True ATR from OHLC: max(high-low, abs(high-prev_close), abs(low-prev_close))."""
+    if len(candles) < 2:
+        return SYMBOL_CFG[sym]["atr_floor"]
+    trs = []
+    for i in range(1, len(candles)):
+        _, _, h, l, c = candles[i]
+        prev_c = candles[i - 1][4]
+        trs.append(max(float(h) - float(l), abs(float(h) - prev_c), abs(float(l) - prev_c)))
+    if not trs:
+        return SYMBOL_CFG[sym]["atr_floor"]
+    a = sum(trs[-period:]) / min(len(trs), period)
+    return max(a, SYMBOL_CFG[sym]["atr_floor"])
+
+
+def atr_estimate(sym, closes_or_candles):
+    """Compatibility wrapper. Uses true ATR when OHLC candles are supplied."""
+    if closes_or_candles and isinstance(closes_or_candles[0], (list, tuple)) and len(closes_or_candles[0]) >= 5:
+        return true_atr(sym, closes_or_candles)
+    closes = closes_or_candles
     diffs = [abs(closes[i] - closes[i - 1]) for i in range(1, len(closes))]
     if not diffs:
         return SYMBOL_CFG[sym]["atr_floor"]
@@ -453,126 +532,195 @@ def efficiency_ratio(closes, n=30):
     return net / max(path, 1e-12)
 
 
-def recent_momentum_ok(side, closes, a):
-    """Require the last few candles to still support the signal direction."""
+def market_regime(sym, candles):
+    closes = closes_from_candles(candles)
+    if len(candles) < 80:
+        return {"name": "WARMUP", "tradeable": False, "reason": "not enough candles"}
+    a = true_atr(sym, candles)
+    er = efficiency_ratio(closes, 30)
+    recent_atr = true_atr(sym, candles[-30:]) if len(candles) >= 35 else a
+    long_atr = true_atr(sym, candles[-160:]) if len(candles) >= 170 else a
+    atr_ratio = recent_atr / max(long_atr, 1e-9)
+    fast, slow = ema(closes[-80:], 12), ema(closes[-120:], 48)
+    trend_gap_atr = abs(fast - slow) / max(a, 1e-9)
+    if atr_ratio > 2.2:
+        return {"name": "VOLATILE_SPIKE", "tradeable": False, "reason": "volatility spike", "er": er, "atr_ratio": atr_ratio}
+    if atr_ratio < 0.35:
+        return {"name": "QUIET", "tradeable": False, "reason": "low volatility", "er": er, "atr_ratio": atr_ratio}
+    if er < MIN_EFFICIENCY or trend_gap_atr < 0.25:
+        return {"name": "CHOPPY", "tradeable": False, "reason": "choppy/ranging", "er": er, "atr_ratio": atr_ratio}
+    return {"name": "TRENDING", "tradeable": True, "reason": "trend regime", "er": er, "atr_ratio": atr_ratio}
+
+
+def recent_momentum_score(side, closes, a):
     if len(closes) < 10:
-        return False
+        return 0
     m3 = closes[-1] - closes[-4]
     m6 = closes[-1] - closes[-7]
-    if side == "BUY":
-        return m3 > 0.12 * a and m6 > 0.25 * a
-    return m3 < -0.12 * a and m6 < -0.25 * a
+    directional = (m3 + 0.7 * m6) if side == "BUY" else (-m3 - 0.7 * m6)
+    return max(0, min(100, int(round((directional / max(a, 1e-9)) * 35))))
 
 
-def yahoo_closes(sym, interval="15m", range_="10d"):
-    """Fetch higher-timeframe closes from Yahoo. Used only after a 5m setup appears."""
+def yahoo_candles(sym, interval="15m", range_="10d"):
     cfg = SYMBOL_CFG[sym]
     d = http_json("https://query1.finance.yahoo.com/v8/finance/chart/"
                   "%s?interval=%s&range=%s" % (
                       urllib.parse.quote(cfg["yahoo"]), interval, range_))
     r = d["chart"]["result"][0]
     ts = r.get("timestamp") or []
-    cl = (r["indicators"]["quote"][0] or {}).get("close") or []
-    return [float(c) for _, c in zip(ts, cl) if c]
+    q = (r["indicators"]["quote"][0] or {})
+    op, hi, lo, cl = q.get("open") or [], q.get("high") or [], q.get("low") or [], q.get("close") or []
+    out = []
+    for t, o, h, l, c in zip(ts, op, hi, lo, cl):
+        if c is None:
+            continue
+        o = c if o is None else o
+        h = c if h is None else h
+        l = c if l is None else l
+        out.append(normalise_candle([int(t), float(o), float(h), float(l), float(c)]))
+    return out
 
 
-def higher_timeframe_ok(sym, side):
-    """15m + 1h confirmation. If data fails, skip the signal for safety."""
+def yahoo_closes(sym, interval="15m", range_="10d"):
+    return closes_from_candles(yahoo_candles(sym, interval, range_))
+
+
+def higher_timeframe_score(sym, side):
+    """15m + 1h confirmation. Returns (score 0-100, reason)."""
     try:
         c15 = yahoo_closes(sym, "15m", "10d")
         c1h = yahoo_closes(sym, "60m", "1mo")
         if len(c15) < 120 or len(c1h) < 120:
-            return False, "not enough MTF data"
+            return 0, "not enough MTF data"
         f15, s15 = ema(c15[-120:], 20), ema(c15[-120:], 80)
         f1h, s1h = ema(c1h[-120:], 20), ema(c1h[-120:], 80)
+        score = 0
         if side == "BUY":
-            ok = f15 > s15 and f1h > s1h and c15[-1] > f15
+            score += 45 if f15 > s15 else 0
+            score += 45 if f1h > s1h else 0
+            score += 10 if c15[-1] > f15 else 0
         else:
-            ok = f15 < s15 and f1h < s1h and c15[-1] < f15
-        return ok, "15m/1h aligned" if ok else "15m/1h not aligned"
+            score += 45 if f15 < s15 else 0
+            score += 45 if f1h < s1h else 0
+            score += 10 if c15[-1] < f15 else 0
+        return score, "15m/1h aligned" if score >= 90 else "15m/1h weak"
     except Exception as e:
         log("  %s: MTF check failed: %s" % (SYMBOL_CFG[sym]["label"], e))
-        return False, "MTF data failed"
+        return 0, "MTF data failed"
 
 
-def analyze(sym, closes):
-    """Smart breakout strategy. Returns signal dict or None.
+def higher_timeframe_ok(sym, side):
+    score, reason = higher_timeframe_score(sym, side)
+    return score >= 90, reason
 
-    Upgrades versus the old bot:
-      - break-and-hold confirmation: last two closes must be beyond the level
-      - anti-chop efficiency filter
-      - rejects weak and late/over-extended breakouts
-      - recent momentum must still support the direction
-      - 15m and 1h trend must agree before VIP can post
-      - confidence score is based on multiple quality factors, not distance only
+
+def highlow_score(sym, side, closes, candles, hi, lo, a, margin_atr, regime):
+    fast, slow = ema(closes[-80:], 12), ema(closes[-120:], 48)
+    mid_fast, mid_slow = ema(closes[-160:], 20), ema(closes[-160:], 80)
+    trend_gap_atr = abs(fast - slow) / max(a, 1e-9)
+    structure_er = efficiency_ratio(closes, 30)
+    trend = max(0, min(100, int(round(trend_gap_atr * 55))))
+    structure = max(0, min(100, int(round(structure_er * 140))))
+    momentum = recent_momentum_score(side, closes, a)
+    breakout = max(0, min(100, int(round(100 - abs(margin_atr - 1.15) * 35))))
+    mtf, mtf_reason = higher_timeframe_score(sym, side)
+    regime_bonus = 5 if regime.get("name") == "TRENDING" else -20
+    score = int(round(0.24 * trend + 0.18 * structure + 0.18 * momentum + 0.20 * breakout + 0.20 * mtf + regime_bonus))
+    score = max(0, min(100, score))
+    return score, {
+        "trend": trend, "structure": structure, "momentum": momentum,
+        "breakout": breakout, "mtf": mtf, "regime": regime.get("name"),
+        "mtf_reason": mtf_reason, "trend_gap": round(trend_gap_atr, 3),
+        "efficiency": round(structure_er, 3), "margin_atr": round(margin_atr, 3),
+    }
+
+
+def analyze(sym, candles):
+    """Return signal dict or None using genuine OHLC + no-trade rules.
+
+    HighLow Score is a 0-100 setup-quality score. It is NOT win probability.
     """
-    if len(closes) < WARMUP:
+    if not candles or len(candles[0]) < 5:
+        candles = [[ts, p, p, p, p] for ts, p in candles]
+    if len(candles) < WARMUP:
+        return None
+    closes = closes_from_candles(candles)
+    highs = highs_from_candles(candles)
+    lows = lows_from_candles(candles)
+    regime = market_regime(sym, candles)
+    if not regime.get("tradeable"):
+        log("  %s: NO-TRADE — %s" % (SYMBOL_CFG[sym]["label"], regime.get("reason")))
         return None
 
-    window = closes[-(LOOKBACK + EXCLUDE):-EXCLUDE]
-    hi, lo = max(window), min(window)
+    window_highs = highs[-(LOOKBACK + EXCLUDE):-EXCLUDE]
+    window_lows = lows[-(LOOKBACK + EXCLUDE):-EXCLUDE]
+    hi, lo = max(window_highs), min(window_lows)
     last, prev = closes[-1], closes[-2]
     fast, slow = ema(closes[-80:], 12), ema(closes[-120:], 48)
     mid_fast, mid_slow = ema(closes[-160:], 20), ema(closes[-160:], 80)
-    a = atr_estimate(sym, closes)
-    er = efficiency_ratio(closes, 30)
+    a = true_atr(sym, candles)
 
-    # Reject one-candle spikes; they are common fake-breakout traps.
-    last_jump_atr = abs(last - prev) / max(a, 1e-9)
-    if last_jump_atr > 1.6:
+    # Reject one-candle news-like spikes.
+    last_range_atr = (candles[-1][2] - candles[-1][3]) / max(a, 1e-9)
+    if last_range_atr > 2.0:
+        log("  %s: NO-TRADE — spike candle" % SYMBOL_CFG[sym]["label"])
         return None
 
-    trend_gap_atr = abs(fast - slow) / max(a, 1e-9)
-    htf_gap_atr = abs(mid_fast - mid_slow) / max(a, 1e-9)
-
-    # Pair-specific strictness. GOLD and GBP/JPY-type pairs need more quality.
     volatile = sym in ("XAUUSD", "GBPJPY", "GBPAUD")
-    er_min = MIN_EFFICIENCY + (0.10 if sym == "XAUUSD" else 0.05 if volatile else 0.0)
+    trend_gap_atr = abs(fast - slow) / max(a, 1e-9)
     trend_min = 0.35 + (0.18 if sym == "XAUUSD" else 0.08 if volatile else 0.0)
-
-    if er < er_min or trend_gap_atr < trend_min or htf_gap_atr < 0.22:
+    if trend_gap_atr < trend_min:
         return None
 
     def build(side, margin, ref_level, kind):
         margin_atr = margin / max(a, 1e-9)
         if margin_atr < MIN_BREAK_ATR or margin_atr > MAX_SPREAD_ATR:
             return None
-        if not recent_momentum_ok(side, closes, a):
+        momentum = recent_momentum_score(side, closes, a)
+        if momentum < 45:
             return None
-        mtf_ok, mtf_reason = higher_timeframe_ok(sym, side)
-        if not mtf_ok:
-            log("  %s: skipped — %s" % (SYMBOL_CFG[sym]["label"], mtf_reason))
+        score, components = highlow_score(sym, side, closes, candles, hi, lo, a, margin_atr, regime)
+        if components["mtf"] < 90:
+            log("  %s: skipped — %s" % (SYMBOL_CFG[sym]["label"], components["mtf_reason"]))
             return None
-
-        # Quality score: max 90. Sweet spot is confirmed but not exhausted.
-        sweet = 1.15
-        score = 70.0
-        score += min(er * 18.0, 12.0)
-        score += min(trend_gap_atr * 10.0, 7.0)
-        score += min(htf_gap_atr * 8.0, 5.0)
-        score += max(0.0, 6.0 - abs(margin_atr - sweet) * 2.5)
         if sym == "XAUUSD":
-            score -= 2.5
-        if volatile:
-            score -= 1.0
+            score = max(0, score - 3)
         return {"side": side, "level": last, "hi": hi, "lo": lo, "atr": a,
-                "conf": int(min(round(score), 90)), "er": round(er, 3),
-                "trend_gap": round(trend_gap_atr, 3), "margin_atr": round(margin_atr, 3),
-                "kind": kind % fmt(sym, ref_level)}
+                "conf": score, "highlow_score": score, "score_components": components,
+                "regime": regime.get("name"), "kind": kind % fmt(sym, ref_level)}
 
-    # Break-and-hold: previous and current close must be beyond the level.
+    # Break-and-hold confirmation uses two closes beyond structure level.
     if last > hi and prev > hi and fast > slow and mid_fast > mid_slow:
-        return build("BUY", last - hi, hi, "clean breakout above %s")
+        return build("BUY", last - hi, hi, "clean OHLC breakout above %s")
     if last < lo and prev < lo and fast < slow and mid_fast < mid_slow:
-        return build("SELL", lo - last, lo, "clean breakdown below %s")
+        return build("SELL", lo - last, lo, "clean OHLC breakdown below %s")
     return None
 
 
 def confidence(sym, sig):
-    """Return strategy quality score."""
-    if "conf" in sig:
-        return int(sig["conf"])
-    return 0
+    """HighLow Score, not a win probability."""
+    return int(sig.get("highlow_score", sig.get("conf", 0)))
+
+
+def make_trade(sym, sig, now):
+    """Create a complete trade object matching the displayed SL/TP and management logic."""
+    entry = float(sig["level"])
+    a = float(sig["atr"])
+    if sig["side"] == "BUY":
+        sl, tp1, tp2 = entry - SL_ATR * a, entry + TP1_ATR * a, entry + TP2_ATR * a
+    else:
+        sl, tp1, tp2 = entry + SL_ATR * a, entry - TP1_ATR * a, entry - TP2_ATR * a
+    score = confidence(sym, sig)
+    return {"symbol": sym, "side": sig["side"], "kind": sig["kind"],
+            "entry": round(entry, 6), "sl": round(sl, 6), "initial_sl": round(sl, 6),
+            "tp1": round(tp1, 6), "tp2": round(tp2, 6), "atr": round(a, 6),
+            "conf": score, "highlow_score": score,
+            "score_components": sig.get("score_components", {}),
+            "regime": sig.get("regime", "UNKNOWN"),
+            "opened_ts": now, "tp1_hit": False, "tp2_hit": False,
+            "break_even": False, "partial_pct": 50, "remaining_pct": 100,
+            "realized_pips": 0.0,
+            "management": "TP1 secures 50% and moves SL to break-even; TP2 closes remainder."}
 
 # ---------------------------------------------------------------- messages ----
 
@@ -586,6 +734,10 @@ def signal_message(sym, tr, vip):
         cfg["emoji"], cfg["label"], tr["side"],
         "\u2B06\uFE0F" if tr["side"] == "BUY" else "\u2B07\uFE0F")
     if vip:
+        comps = tr.get("score_components", {}) or {}
+        comp_line = "Trend %s | Structure %s | Momentum %s | Breakout %s | MTF %s" % (
+            comps.get("trend", "-"), comps.get("structure", "-"),
+            comps.get("momentum", "-"), comps.get("breakout", "-"), comps.get("mtf", "-"))
         return "\n".join([
             head,
             "\U0001F48E VIP — %s" % tr["kind"],
@@ -595,12 +747,16 @@ def signal_message(sym, tr, vip):
             "TP 1: %s  (%d pips)" % (fmt(sym, tr["tp1"]), abs(pips_for(sym, tr["side"], tr["entry"], tr["tp1"]))),
             "TP 2: %s  (%d pips)" % (fmt(sym, tr["tp2"]), abs(pips_for(sym, tr["side"], tr["entry"], tr["tp2"]))),
             "",
-            "Confidence: %d%%" % tr["conf"],
+            "HighLow Score: %d/100 (setup quality, not win probability)" % tr["highlow_score"],
+            "Components: " + comp_line,
+            "Market regime: %s" % tr.get("regime", "UNKNOWN"),
+            "Management: TP1 partial + SL to break-even; TP2 final target.",
             ts_str(tr["opened_ts"]),
         ])
     lines = [
         head,
         "Entry: %s  (%s)" % (fmt(sym, tr["entry"]), tr["kind"]),
+        "HighLow Score: %d/100" % tr.get("highlow_score", tr.get("conf", 0)),
         "",
         "Full SL + TP1/TP2 levels, live updates & daily recap \u2192 VIP",
     ]
@@ -610,14 +766,29 @@ def signal_message(sym, tr, vip):
     return "\n".join(lines)
 
 
+def tp1_message(sym, tr):
+    cfg = SYMBOL_CFG[sym]
+    p = pips_for(sym, tr["side"], tr["entry"], tr["tp1"])
+    return "\n".join([
+        "\U0001F7E9 %s TP1 HIT — %s" % (cfg["label"], tr["side"]),
+        "TP1: %s (%+.0f pips)" % (fmt(sym, tr["tp1"]), p),
+        "50%% secured. Stop loss moved to break-even: %s" % fmt(sym, tr["entry"]),
+        "TP2 remains: %s" % fmt(sym, tr["tp2"]),
+        ts_str(int(time.time())),
+    ])
+
+
 def close_message(sym, tr, exit_price, reason, win):
     cfg = SYMBOL_CFG[sym]
-    p = pips_for(sym, tr["side"], tr["entry"], exit_price)
+    p = tr.get("result_pips")
+    if p is None:
+        p = pips_for(sym, tr["side"], tr["entry"], exit_price)
     emoji = "\u2705" if win else "\u274C"
     return "\n".join([
         "%s %s CLOSED — %s from %s" % (emoji, cfg["label"], tr["side"], fmt(sym, tr["entry"])),
         "Exit: %s (%s)" % (fmt(sym, exit_price), reason),
-        "Result: %+.0f pips %s" % (p, "\U0001F7E9" if win else "\U0001F5E5"),
+        "Result: %+.1f pips %s" % (p, "\U0001F7E9" if p >= 0 else "\U0001F5E5"),
+        "HighLow Score was: %s/100" % tr.get("highlow_score", tr.get("conf", "-")),
         ts_str(int(time.time())),
     ])
 
@@ -749,58 +920,154 @@ def global_loss_pause(st, now):
     return False
 
 
+def opened_trades_from_state(st):
+    trades = []
+    for sym, ss in st.get("symbols", {}).items():
+        if ss.get("open"):
+            t = dict(ss["open"])
+            t.setdefault("symbol", sym)
+            trades.append(t)
+        for t in ss.get("closed", []):
+            tt = dict(t)
+            if not tt.get("symbol"):
+                tt["symbol"] = sym
+            trades.append(tt)
+    return trades
+
+
+def count_opened_today(st, sym=None):
+    start = dt.datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return sum(1 for t in opened_trades_from_state(st)
+               if t.get("opened_ts", 0) >= start and (sym is None or t.get("symbol") == sym))
+
+
+def performance_stats(st):
+    trades = closed_trades_from_state(st)
+    if not trades:
+        return {"closed": 0, "wins": 0, "losses": 0, "winrate": 0, "pips": 0.0, "last10": "-"}
+    wins = [t for t in trades if t.get("win")]
+    last10 = trades[:10]
+    last10_wins = sum(1 for t in last10 if t.get("win"))
+    return {
+        "closed": len(trades), "wins": len(wins), "losses": len(trades) - len(wins),
+        "winrate": int(100 * len(wins) / len(trades)),
+        "pips": round(sum(float(t.get("pips", 0)) for t in trades), 1),
+        "last10": "%dW/%dL" % (last10_wins, len(last10) - last10_wins),
+        "updated_ts": int(time.time()),
+    }
+
+
+def candle_hit_levels(side, candle, sl, tp1=None, tp2=None):
+    """Conservative OHLC level-hit detection on the latest closed candle."""
+    _, o, h, l, c = candle
+    if side == "BUY":
+        return {"sl": l <= sl, "tp1": tp1 is not None and h >= tp1, "tp2": tp2 is not None and h >= tp2}
+    return {"sl": h >= sl, "tp1": tp1 is not None and l <= tp1, "tp2": tp2 is not None and l <= tp2}
+
+
+def blended_result_pips(sym, tr, exit_price, reason):
+    side, entry = tr["side"], tr["entry"]
+    if tr.get("tp1_hit"):
+        p1 = pips_for(sym, side, entry, tr["tp1"]) * (tr.get("partial_pct", 50) / 100.0)
+        p2 = pips_for(sym, side, entry, exit_price) * (tr.get("remaining_pct", 50) / 100.0)
+        return round(p1 + p2, 1)
+    return round(pips_for(sym, side, entry, exit_price), 1)
+
+
 def manage_open_trade(sym, sym_state, chat):
-    """Close open trade if SL/TP1 is reached. Returns True if a close happened."""
-    closes = [p for _, p in sym_state["history"]]
-    if not closes:
+    """Manage TP1, break-even and TP2 using OHLC, not close-only prices."""
+    candles = sym_state.get("candles") or []
+    if not candles and sym_state.get("history"):
+        candles = [[ts, p, p, p, p] for ts, p in sym_state["history"]]
+    if not candles:
         return False
-    price = closes[-1]
+    candle = candles[-1]
+    price = candle[4]
     now = int(time.time())
     tr = sym_state.get("open")
     if not tr:
         return False
-    if tr["side"] == "BUY":
-        hit_sl, hit_tp = price <= tr["sl"], price >= tr["tp1"]
-    else:
-        hit_sl, hit_tp = price >= tr["sl"], price <= tr["tp1"]
-    if hit_sl or hit_tp:
-        reason = "SL" if hit_sl else "TP1"
-        exit_price = tr["sl"] if hit_sl else tr["tp1"]
-        win = hit_tp
-        send_telegram(chat, close_message(sym, tr, exit_price, reason, win))
-        sym_state["closed"].append({
-            **tr, "symbol": sym, "exit": exit_price, "reason": reason, "win": win,
-            "closed_ts": now,
-            "pips": round(pips_for(sym, tr["side"], tr["entry"], exit_price), 1)})
+
+    tr.setdefault("tp1_hit", False)
+    tr.setdefault("tp2_hit", False)
+    tr.setdefault("break_even", False)
+    tr.setdefault("partial_pct", 50)
+    tr.setdefault("remaining_pct", 100 if not tr.get("tp1_hit") else 50)
+    tr.setdefault("initial_sl", tr.get("sl"))
+
+    hits = candle_hit_levels(tr["side"], candle, tr["sl"], tr["tp1"], tr["tp2"])
+
+    # Conservative ordering before TP1: if SL and TP1 appear in the same candle,
+    # count SL first. This avoids overstating results with 5m OHLC ambiguity.
+    if not tr["tp1_hit"] and hits["sl"]:
+        exit_price = tr["sl"]
+        result = blended_result_pips(sym, tr, exit_price, "SL")
+        tr["result_pips"] = result
+        send_telegram(chat, close_message(sym, tr, exit_price, "SL", result > 0))
+        sym_state["closed"].append({**tr, "symbol": sym, "exit": exit_price, "reason": "SL",
+                                    "win": result > 0, "closed_ts": now, "pips": result})
         sym_state["open"] = None
         return True
+
+    if not tr["tp1_hit"] and hits["tp1"]:
+        tr["tp1_hit"] = True
+        tr["break_even"] = True
+        tr["remaining_pct"] = 100 - tr.get("partial_pct", 50)
+        tr["realized_pips"] = round(pips_for(sym, tr["side"], tr["entry"], tr["tp1"]) * (tr.get("partial_pct", 50) / 100.0), 1)
+        tr["sl"] = tr["entry"]  # move remaining position to break-even
+        send_telegram(chat, tp1_message(sym, tr))
+        log("  %s: TP1 hit; SL moved to break-even" % SYMBOL_CFG[sym]["label"])
+        # Same candle may also reach TP2. Allow TP2 after TP1.
+        hits = candle_hit_levels(tr["side"], candle, tr["sl"], tr["tp1"], tr["tp2"])
+
+    if tr.get("tp1_hit") and hits["tp2"]:
+        exit_price = tr["tp2"]
+        result = blended_result_pips(sym, tr, exit_price, "TP2")
+        tr["tp2_hit"] = True
+        tr["result_pips"] = result
+        send_telegram(chat, close_message(sym, tr, exit_price, "TP2", True))
+        sym_state["closed"].append({**tr, "symbol": sym, "exit": exit_price, "reason": "TP2",
+                                    "win": True, "closed_ts": now, "pips": result})
+        sym_state["open"] = None
+        return True
+
+    if tr.get("tp1_hit") and hits["sl"]:
+        exit_price = tr["sl"]
+        result = blended_result_pips(sym, tr, exit_price, "BE")
+        tr["result_pips"] = result
+        reason = "BE after TP1" if abs(exit_price - tr["entry"]) < 1e-12 else "SL after TP1"
+        send_telegram(chat, close_message(sym, tr, exit_price, reason, result > 0))
+        sym_state["closed"].append({**tr, "symbol": sym, "exit": exit_price, "reason": reason,
+                                    "win": result > 0, "closed_ts": now, "pips": result})
+        sym_state["open"] = None
+        return True
+
     log("  %s: open %s from %s still running (now %s)"
         % (SYMBOL_CFG[sym]["label"], tr["side"], fmt(sym, tr["entry"]), fmt(sym, price)))
     return False
 
 
-def scan_symbol_for_candidate(sym, sym_state, chat, vip, allow_new=True, all_trades=None):
-    """Update one symbol, manage open trade, and return a candidate signal or None."""
+def scan_symbol_for_candidate(sym, sym_state, chat, vip, allow_new=True, st=None):
+    """Update one symbol, manage open trade, and return a ranked candidate or None."""
     cfg = SYMBOL_CFG[sym]
-    pts = fetch_prices(sym)
-    merge_history(sym_state, pts)
-    closes = [p for _, p in sym_state["history"]]
+    candles = fetch_candles(sym)
+    merge_candles(sym_state, candles)
+    candles = sym_state.get("candles") or [[ts, p, p, p, p] for ts, p in sym_state.get("history", [])]
 
-    if len(closes) < 2:
-        log("  %s: warming up (%d pts)" % (cfg["label"], len(closes)))
+    if len(candles) < 2:
+        log("  %s: warming up (%d candles)" % (cfg["label"], len(candles)))
         return None
 
-    price = closes[-1]
+    price = candles[-1][4]
     now = int(time.time())
-    log("  %s: %s | %d pts" % (cfg["label"], fmt(sym, price), len(closes)))
+    log("  %s: %s | %d candles" % (cfg["label"], fmt(sym, price), len(candles)))
 
     manage_open_trade(sym, sym_state, chat)
 
-    # Safety gates before considering a fresh signal.
     if sym_state.get("open") is not None:
         return None
     if not allow_new:
-        log("  %s: protection/session pause active — no new signal" % cfg["label"])
+        log("  %s: protection/session/news pause active — no new signal" % cfg["label"])
         return None
     if now - sym_state["last_signal_ts"] <= COOLDOWN_S:
         log("  %s: cooldown active — no new signal" % cfg["label"])
@@ -808,29 +1075,29 @@ def scan_symbol_for_candidate(sym, sym_state, chat, vip, allow_new=True, all_tra
     if vip and symbol_loss_pause(sym_state, now):
         log("  %s: skipped — recent loss cooldown" % cfg["label"])
         return None
-    if vip and all_trades is not None:
-        if count_trades_today(all_trades) >= MAX_VIP_PER_DAY:
-            log("  %s: skipped — VIP daily signal limit reached" % cfg["label"])
+    if vip and st is not None:
+        if count_opened_today(st) >= MAX_VIP_PER_DAY:
+            log("  %s: skipped — VIP opened-signal daily limit reached" % cfg["label"])
             return None
-        if count_trades_today(all_trades, sym) >= MAX_SYMBOL_PER_DAY:
-            log("  %s: skipped — symbol daily limit reached" % cfg["label"])
+        if count_opened_today(st, sym) >= MAX_SYMBOL_PER_DAY:
+            log("  %s: skipped — symbol opened-signal daily limit reached" % cfg["label"])
             return None
 
-    sig = analyze(sym, closes)
+    sig = analyze(sym, candles)
     if not sig:
-        log("  %s: no clean smart setup — flat" % cfg["label"])
+        log("  %s: no postable HighLow setup — flat" % cfg["label"])
         return None
 
-    conf = confidence(sym, sig)
-    if vip and conf <= MIN_CONF_VIP:
-        log("  %s: setup found (%d%% conf) <= VIP bar (%d%%) — skipped"
-            % (cfg["label"], conf, MIN_CONF_VIP))
+    score = confidence(sym, sig)
+    if vip and score <= MIN_CONF_VIP:
+        log("  %s: setup found (HighLow %d/100) <= VIP bar (%d) — skipped"
+            % (cfg["label"], score, MIN_CONF_VIP))
         return None
 
     tr = make_trade(sym, sig, now)
-    # Ranking score: confidence first, then trend quality, then cleaner breakout.
-    rank = conf + float(sig.get("er", 0)) * 10 + float(sig.get("trend_gap", 0)) * 2
-    return {"symbol": sym, "trade": tr, "rank": rank, "conf": conf, "sig": sig}
+    comps = sig.get("score_components", {})
+    rank = score + float(comps.get("structure", 0)) * 0.05 + float(comps.get("momentum", 0)) * 0.05
+    return {"symbol": sym, "trade": tr, "rank": rank, "score": score, "sig": sig}
 
 
 def post_candidate(chat, st, candidate, vip):
@@ -840,8 +1107,8 @@ def post_candidate(chat, st, candidate, vip):
     ss["open"] = tr
     ss["last_signal_ts"] = int(time.time())
     send_telegram(chat, signal_message(sym, tr, vip=vip))
-    log("  %s: POSTED best %s signal at %s (%d%% conf)"
-        % (SYMBOL_CFG[sym]["label"], tr["side"], fmt(sym, tr["entry"]), candidate["conf"]))
+    log("  %s: POSTED best %s signal at %s (HighLow %d/100)"
+        % (SYMBOL_CFG[sym]["label"], tr["side"], fmt(sym, tr["entry"]), candidate["score"]))
 
 
 def run_channel(role):
@@ -855,7 +1122,6 @@ def run_channel(role):
     symbols = SYMBOLS_BY_ROLE.get(role, SYMBOLS_BY_ROLE["free"])
     now = int(time.time())
     vip = (role == "vip")
-    all_trades = closed_trades_from_state(st)
 
     allow_new = True
     if vip and global_loss_pause(st, now):
@@ -872,7 +1138,7 @@ def run_channel(role):
     candidates = []
     for sym in symbols:
         ss = st["symbols"].setdefault(sym, new_symbol_state())
-        c = scan_symbol_for_candidate(sym, ss, chat, vip=vip, allow_new=allow_new, all_trades=all_trades)
+        c = scan_symbol_for_candidate(sym, ss, chat, vip=vip, allow_new=allow_new, st=st)
         if c:
             candidates.append(c)
 
@@ -886,8 +1152,12 @@ def run_channel(role):
             log("  %s: valid setup skipped — lower rank than posted signal"
                 % SYMBOL_CFG[c["symbol"]]["label"])
     else:
-        log("No postable setup after smart filters/ranking.")
+        log("No postable setup after HighLow filters/ranking.")
 
+    st["performance"] = performance_stats(st)
+    perf = st["performance"]
+    log("Performance: %s closed | %dW/%dL | %d%% | %+0.1f pips | last10 %s" % (
+        perf["closed"], perf["wins"], perf["losses"], perf["winrate"], perf["pips"], perf["last10"]))
     save_state(st, path)
 
 
