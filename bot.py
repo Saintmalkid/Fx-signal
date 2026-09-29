@@ -50,19 +50,11 @@ FOOTER      = os.environ.get("FOOTER", "").strip()
 SYMBOLS_BY_ROLE = {
     "free": ["XAUUSD"],
 
-    # Optimized VIP list:
-    # GOLD + all 7 major forex pairs + 10 liquid cross pairs.
-    # No exotic pairs included.
-    "vip": [
-        "XAUUSD",
-
-        # Major pairs
-        "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
-
-        # High-liquidity cross pairs
-        "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "NZDJPY",
-        "EURAUD", "EURCAD", "GBPAUD", "CADJPY", "CHFJPY",
-    ],
+    # TEMPORARY LIVE SAFETY MODE:
+    # VIP is GOLD-only for now because accumulated live results show
+    # non-GOLD forex pairs are underperforming. The full forex config remains
+    # below for research/re-enable later, but live scanning is limited here.
+    "vip": ["XAUUSD"],
 }
 
 # Per-symbol configuration: display, pip size, decimals, ATR floor, feeds
@@ -818,7 +810,7 @@ def welcome_message(role):
     if role == "vip":
         pairs = ", ".join(SYMBOL_CFG[s]["label"] for s in SYMBOLS_BY_ROLE["vip"])
         return "\n".join([
-            "\u2705 GOLD HL BOT — VIP channel is LIVE",
+                "\u2705 GOLD HL BOT — VIP channel is LIVE",
             "",
             "VIP watches: %s" % pairs,
             "Sniper mode: only setups above %d%% confidence get posted." % MIN_CONF_VIP,
@@ -1222,5 +1214,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    
+    main()    
