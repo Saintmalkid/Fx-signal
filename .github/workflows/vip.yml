@@ -2,7 +2,7 @@ name: VIP Channel (every 5 min)
 
 on:
   schedule:
-    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"    # every 5 minutes
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -32,6 +32,12 @@ jobs:
       - name: Run bot
         run: python bot.py
 
+      - name: Install trader dependency
+        run: pip install websocket-client
+
+      - name: Execute trades (Deriv demo)
+        run: python trader.py
+
       - name: Commit state (bot memory)
         run: |
           git config user.name  "signal-bot"
@@ -40,3 +46,4 @@ jobs:
           git commit -m "update state [skip ci]" || echo "nothing to commit"
           git pull --rebase --autostash || true
           git push || (git pull --rebase && git push)
+          
