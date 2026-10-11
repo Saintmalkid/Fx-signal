@@ -22,6 +22,7 @@ jobs:
       TELEGRAM_VIP_CHAT_ID: ${{ secrets.TELEGRAM_VIP_CHAT_ID }}
       TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
       DERIV_TOKEN: ${{ secrets.DERIV_TOKEN }}
+      DERIV_APP_ID: "34DQFwx3VLNwLIm8CDDB5"
     steps:
       - uses: actions/checkout@v4
 
