@@ -833,11 +833,49 @@ def parse_hhmm(s):
     return int(h) * 60 + int(m)
 
 
+def market_open_utc(now_utc):
+    """True when the forex/gold market is open. Closed Fri 21:00 UTC -> Sun 21:00 UTC."""
+    wd = now_utc.weekday()                       # Mon=0 ... Sun=6
+    if wd == 5:                                  # Saturday
+        return False
+    if wd == 4 and now_utc.hour >= 21:           # Friday >= 21:00 UTC
+        return False
+    if wd == 6 and now_utc.hour < 21:            # Sunday before 21:00 UTC
+        return False
+    return True
+
+
+def market_open_utc(now_utc):
+    """True when the forex/gold market is open. Closed Fri 21:00 UTC -> Sun 21:00 UTC."""
+    wd = now_utc.weekday()                       # Mon=0 ... Sun=6
+    if wd == 5:                                  # Saturday
+        return False
+    if wd == 4 and now_utc.hour >= 21:           # Friday >= 21:00 UTC
+        return False
+    if wd == 6 and now_utc.hour < 21:            # Sunday before 21:00 UTC
+        return False
+    return True
+
+
+def market_open_utc(now_utc):
+    """True when the forex/gold market is open. Closed Fri 21:00 UTC -> Sun 21:00 UTC."""
+    wd = now_utc.weekday()                       # Mon=0 ... Sun=6
+    if wd == 5:                                  # Saturday
+        return False
+    if wd == 4 and now_utc.hour >= 21:           # Friday >= 21:00 UTC
+        return False
+    if wd == 6 and now_utc.hour < 21:            # Sunday before 21:00 UTC
+        return False
+    return True
+
+
 def in_session(now=None):
-    """London-session filter. Set SESSION_WINDOWS_LOCAL empty to disable."""
+    """London-session filter + WEEKEND GUARD. Set SESSION_WINDOWS_LOCAL empty to disable."""
     if not SESSION_WINDOWS_LOCAL.strip():
         return True
     now = now or dt.datetime.now(LOCAL_TZ)
+    if not market_open_utc(now.astimezone(dt.timezone.utc)):
+        return False
     mins = now.hour * 60 + now.minute
     for part in SESSION_WINDOWS_LOCAL.split(","):
         part = part.strip()
@@ -848,7 +886,6 @@ def in_session(now=None):
         if start <= mins <= end:
             return True
     return False
-
 
 def in_manual_news_pause(now=None):
     """Manual news pause. Use NEWS_PAUSE_UTC env when high-impact news is expected."""
