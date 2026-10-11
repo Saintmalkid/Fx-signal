@@ -49,12 +49,9 @@ FOOTER      = os.environ.get("FOOTER", "").strip()
 # Which symbols each role watches
 SYMBOLS_BY_ROLE = {
     "free": ["XAUUSD"],
-
-    # TEMPORARY LIVE SAFETY MODE:
-    # VIP is GOLD-only for now because accumulated live results show
-    # non-GOLD forex pairs are underperforming. The full forex config remains
-    # below for research/re-enable later, but live scanning is limited here.
-    "vip": ["XAUUSD"],
+# VIP: GOLD + the 3 major forex pairs (majors are liquid and trend well;
+    # exotic crosses tested 0-8 live and are permanently out).
+    "vip": ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"],
 }
 
 # Per-symbol configuration: display, pip size, decimals, ATR floor, feeds
@@ -242,7 +239,7 @@ COOLDOWN_S  = 120 * 60       # minimum time between new signals per symbol
 # -------------------------- VIP safety controls -----------------------------
 # This version is built for subscriber protection: fewer signals, better filters.
 # It scans all pairs, ranks valid setups, then posts only the best one.
-MIN_CONF_VIP        = int(os.environ.get("VIP_MIN_CONF", "89"))  # code posts only ABOVE this -> 90 only by default
+MIN_CONF_VIP        = int(os.environ.get("VIP_MIN_CONF", "0"))  # 0 = post every valid setup
 LOSS_COOLDOWN_S     = int(os.environ.get("LOSS_COOLDOWN_HOURS", "8")) * 3600
 GLOBAL_LOSS_PAUSE_S = int(os.environ.get("GLOBAL_LOSS_PAUSE_HOURS", "4")) * 3600
 MAX_VIP_PER_DAY     = int(os.environ.get("MAX_VIP_SIGNALS_PER_DAY", "4"))
