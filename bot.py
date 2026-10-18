@@ -46,6 +46,10 @@ FREE_CHAT   = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 TD_KEY      = os.environ.get("TWELVEDATA_KEY", "").strip()
 FOOTER      = os.environ.get("FOOTER", "").strip()
 
+# KILL SWITCH: signals posting is DISABLED by default (shadow mode) while the
+# strategy is retrained. To relaunch live posting, either change "false" below
+# back to "true", or set SIGNALS_ENABLED: "true" in the workflow env blocks.
+SIGNALS_ENABLED = os.environ.get("SIGNALS_ENABLED", "false").strip().lower() not in ("0", "false", "no", "off")
 # Which symbols each role watches
 SYMBOLS_BY_ROLE = {
     "free": ["XAUUSD"],
@@ -277,6 +281,9 @@ def http_json(url, timeout=25):
 
 def send_telegram(chat_id, text):
     """Send a message. DRY-RUN (no token/chat) prints to stdout instead."""
+    if not SIGNALS_ENABLED:
+        log("SILENT MODE — posting disabled; message suppressed (trade still recorded)")
+        return True
     if not TOKEN or not chat_id:
         log("DRY-RUN — would post to %s:\n%s\n" % (chat_id or "(no chat id)", text))
         return True
