@@ -39,7 +39,7 @@ jobs:
       - name: Execute trades (Deriv demo)
         run: python trader.py
 
-        name: Run v3 shadow engine (gold swing)
+      - name: Run v3 shadow engine (gold swing)
         run: python strategy_v3.py
 
       - name: Commit state (bot memory)
