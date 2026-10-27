@@ -1,1 +1,1 @@
-{"position": null, "trades": [{"symbol": "XAUUSD", "side": "SELL", "entry": 4102.0, "exit": 4066.199951171875, "opened_ts": 1792641600, "closed_ts": 1793098800, "pips": 352.0}], "last_bar_ts": 1793113200, "started_ts": 1792309833}
+{"position": null, "trades": [{"symbol": "XAUUSD", "side": "SELL", "entry": 4102.0, "exit": 4066.199951171875, "opened_ts": 1792641600, "closed_ts": 1793098800, "pips": 352.0}], "last_bar_ts": 1793116800, "started_ts": 1792309833}
